@@ -14,9 +14,12 @@
 package com.couchbase.lite.support;
 
 import com.couchbase.lite.internal.InterfaceAudience;
+import com.couchbase.lite.internal.database.log.Logger;
 
 import java.net.URL;
 import java.security.GeneralSecurityException;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
@@ -35,6 +38,8 @@ import okhttp3.Cookie;
 import okhttp3.CookieJar;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
+import okhttp3.ConnectionSpec;
+import okhttp3.TlsVersion;
 
 public class CouchbaseLiteHttpClientFactory implements HttpClientFactory {
     private OkHttpClient client;
@@ -42,7 +47,7 @@ public class CouchbaseLiteHttpClientFactory implements HttpClientFactory {
     private SSLSocketFactory sslSocketFactory;
     private HostnameVerifier hostnameVerifier;
     private boolean followRedirects = true;
-
+    private boolean forceTls12 = true; //Force to use Tls v1.2
     // deprecated
     public static int DEFAULT_SO_TIMEOUT_SECONDS = 40; // 40 sec (previously it was 5 min)
     // heartbeat value 30sec + 10 sec
@@ -52,6 +57,8 @@ public class CouchbaseLiteHttpClientFactory implements HttpClientFactory {
     public static int DEFAULT_READ_TIMEOUT = DEFAULT_SO_TIMEOUT_SECONDS;
     public static int DEFAULT_WRITE_TIMEOUT = 10;
 
+    public static Logger logger = new com.couchbase.lite.internal.database.log.SystemLogger();
+
     /**
      * Constructor
      */
@@ -59,6 +66,15 @@ public class CouchbaseLiteHttpClientFactory implements HttpClientFactory {
         this.cookieJar = cookieJar;
     }
 
+    /*
+     * Set to True for OS that requires force of TLS 1.2 (Android API 16 to 21)
+     */
+    public void setForceTls12(boolean value){
+        forceTls12 = value;
+    }
+    public boolean getForceTls12(){
+        return(forceTls12);
+    }
     /**
      * @param sslSocketFactory This is to open up the system for end user to inject
      *                         the sslSocket factories with their custom KeyStore
@@ -116,8 +132,13 @@ public class CouchbaseLiteHttpClientFactory implements HttpClientFactory {
 
             if (!isFollowRedirects())
                 builder.followRedirects(false);
-
-            client = builder.build();
+            //MacKenzie: Force TLS 1.2 if set for Android API 16 to 21
+            if (forceTls12) {
+                client = enableTls12O(builder).build();
+            }
+            else{
+                client = builder.build();
+            }
         }
         return client;
     }
@@ -261,5 +282,36 @@ public class CouchbaseLiteHttpClientFactory implements HttpClientFactory {
      */
     public void setFollowRedirects(boolean followRedirects) {
         this.followRedirects = followRedirects;
+    }
+
+    // SDK_INT = Build.VERSION.SDK_INT (import android.os.Build;)
+    public static OkHttpClient.Builder enableTls12O(OkHttpClient.Builder client) {
+        try {
+            SSLContext sc = SSLContext.getInstance("TLSv1.2");
+            sc.init(null, null, null);
+            client.sslSocketFactory(new Tls12SocketFactory(sc.getSocketFactory()));
+
+            ConnectionSpec cs = new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+                    .tlsVersions(TlsVersion.TLS_1_2)
+                    .build();
+
+            List<ConnectionSpec> specs = new ArrayList<ConnectionSpec>();
+            specs.add(cs);
+            specs.add(ConnectionSpec.COMPATIBLE_TLS);
+            specs.add(ConnectionSpec.CLEARTEXT);
+            logger.w("OkHttpTLSCompat", "Set OkHttp to use TLS 1.2");
+
+            client.connectionSpecs(specs);
+        } catch (NoSuchAlgorithmException exc) {
+
+            logger.e("OkHttpTLSCompat", "No Such Algorithm Error while setting TLS 1.2", exc);
+            //    throw exc;
+            //Log.e("OkHttpTLSCompat", "Error while setting TLS 1.2", exc);
+            //Add new exception for this??
+        } catch (KeyManagementException exc) {
+            logger.e("OkHttpTLSCompat", "Key Management Error while setting TLS 1.2", exc);
+            //Add new exception for this??
+        }
+        return client;
     }
 }
